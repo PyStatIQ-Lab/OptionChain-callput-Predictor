@@ -1,19 +1,50 @@
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Tuple, Optional
+from datetime import datetime
 
 class OptionChainAnalyzer:
     def __init__(self):
         self.option_chain = None
         self.current_spot = None
-        self.expiry_date = "03-04-2025"
+        self.expiry_date = None
         
-    def fetch_data(self) -> Optional[dict]:
+    def get_user_input(self):
+        """Get expiry date and strike price from user"""
+        while True:
+            print("\nAvailable expiry dates (example):")
+            print("1. 03-04-2025")
+            print("2. 10-04-2025")
+            print("3. 17-04-2025")
+            print("4. Custom date")
+            
+            choice = input("Select expiry date (1-4): ")
+            
+            if choice == '1':
+                self.expiry_date = "03-04-2025"
+                break
+            elif choice == '2':
+                self.expiry_date = "10-04-2025"
+                break
+            elif choice == '3':
+                self.expiry_date = "17-04-2025"
+                break
+            elif choice == '4':
+                self.expiry_date = input("Enter custom date (DD-MM-YYYY): ")
+                try:
+                    datetime.strptime(self.expiry_date, "%d-%m-%Y")
+                    break
+                except ValueError:
+                    print("Invalid date format. Please use DD-MM-YYYY")
+            else:
+                print("Invalid choice. Please try again.")
+    
+    def fetch_data(self):
         """Fetch option chain data from Upstox API"""
         url = f"https://service.upstox.com/option-analytics-tool/open/v1/strategy-chains?assetKey=NSE_INDEX%7CNifty+50&strategyChainType=PC_CHAIN&expiry={self.expiry_date}"
         
         try:
+            print(f"\nFetching data for expiry {self.expiry_date}...")
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             return response.json()
@@ -21,7 +52,7 @@ class OptionChainAnalyzer:
             print(f"API request failed: {str(e)}")
             return None
 
-    def process_data(self, data: dict) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
+    def process_data(self, data):
         """Process raw API data into structured DataFrame"""
         if not data or 'data' not in data:
             print("Invalid API response structure")
@@ -36,8 +67,8 @@ class OptionChainAnalyzer:
                 print("Could not determine ATM strike price")
                 return None, None
 
-            # Process calls and puts with proper error handling
-            def process_options(options: list) -> list:
+            # Process calls and puts
+            def process_options(options):
                 processed = []
                 for opt in options:
                     try:
@@ -46,7 +77,7 @@ class OptionChainAnalyzer:
                             'openInterest': float(opt.get('openInterest', 0)),
                             'changeinOpenInterest': float(opt.get('changeinOpenInterest', 0)),
                             'totalTradedVolume': float(opt.get('totalTradedVolume', 0)),
-                            'impliedVolatility': float(opt.get('impliedVolatility', opt.get('impliedVolatility', 0))),
+                            'impliedVolatility': float(opt.get('impliedVolatility', 0)),
                             'lastPrice': float(opt.get('lastPrice', 0)),
                             'bidPrice': float(opt.get('bidPrice', 0)),
                             'askPrice': float(opt.get('askPrice', 0))
@@ -59,35 +90,30 @@ class OptionChainAnalyzer:
             calls = process_options(data['data']['callOptions'])
             puts = process_options(data['data']['putOptions'])
 
-            # Create DataFrames with consistent column names
+            # Create DataFrames
             calls_df = pd.DataFrame(calls).add_suffix('_call')
             puts_df = pd.DataFrame(puts).add_suffix('_put')
             
-            # Merge on strike price with validation
-            try:
-                option_chain = pd.merge(
-                    calls_df.rename(columns={'strikePrice_call': 'strikePrice'}),
-                    puts_df.rename(columns={'strikePrice_put': 'strikePrice'}),
-                    on='strikePrice',
-                    how='outer'
-                ).fillna(0)
-                
-                # Calculate moneyness
-                option_chain['moneyness'] = option_chain['strikePrice'].apply(
-                    lambda x: 'ITM' if x < atm_strike else 'OTM' if x > atm_strike else 'ATM'
-                )
-                
-                return option_chain, atm_strike
-                
-            except Exception as e:
-                print(f"Data merge failed: {str(e)}")
-                return None, None
+            # Merge on strike price
+            option_chain = pd.merge(
+                calls_df.rename(columns={'strikePrice_call': 'strikePrice'}),
+                puts_df.rename(columns={'strikePrice_put': 'strikePrice'}),
+                on='strikePrice',
+                how='outer'
+            ).fillna(0)
+            
+            # Add moneyness
+            option_chain['moneyness'] = option_chain['strikePrice'].apply(
+                lambda x: 'ITM' if x < atm_strike else 'OTM' if x > atm_strike else 'ATM'
+            )
+
+            return option_chain, atm_strike
 
         except Exception as e:
             print(f"Data processing error: {str(e)}")
             return None, None
 
-    def analyze_strike(self, strike: float) -> Optional[dict]:
+    def analyze_strike(self, strike):
         """Analyze specific strike price"""
         if self.option_chain is None:
             print("Option chain data not loaded")
@@ -109,9 +135,37 @@ class OptionChainAnalyzer:
                     'openInterest': strike_data['openInterest_put'],
                     'impliedVolatility': strike_data['impliedVolatility_put'],
                     'bidAskSpread': strike_data['askPrice_put'] - strike_data['bidPrice_put']
-                },
-                'recommendation': self._generate_recommendation(strike_data)
+                }
             }
+            
+            # Generate recommendation
+            call_score = 0
+            put_score = 0
+            
+            # IV comparison (lower is better)
+            if analysis['call']['impliedVolatility'] < analysis['put']['impliedVolatility']:
+                call_score += 1
+            else:
+                put_score += 1
+                
+            # OI comparison (higher is better)
+            if analysis['call']['openInterest'] > analysis['put']['openInterest']:
+                call_score += 1
+            else:
+                put_score += 1
+                
+            # Spread comparison (tighter is better)
+            if analysis['call']['bidAskSpread'] < analysis['put']['bidAskSpread']:
+                call_score += 1
+            else:
+                put_score += 1
+                
+            if call_score > put_score:
+                analysis['recommendation'] = f"Consider CALL option (Score: {call_score}-{put_score})"
+            elif put_score > call_score:
+                analysis['recommendation'] = f"Consider PUT option (Score: {put_score}-{call_score})"
+            else:
+                analysis['recommendation'] = "Neutral - no clear advantage"
             
             return analysis
             
@@ -121,38 +175,6 @@ class OptionChainAnalyzer:
         except Exception as e:
             print(f"Strike analysis failed: {str(e)}")
             return None
-
-    def _generate_recommendation(self, strike_data: pd.Series) -> str:
-        """Generate trading recommendation based on multiple factors"""
-        call_iv = strike_data['impliedVolatility_call']
-        put_iv = strike_data['impliedVolatility_put']
-        call_oi = strike_data['openInterest_call']
-        put_oi = strike_data['openInterest_put']
-        call_spread = strike_data['askPrice_call'] - strike_data['bidPrice_call']
-        put_spread = strike_data['askPrice_put'] - strike_data['bidPrice_put']
-        
-        factors = []
-        
-        if call_iv < put_iv:
-            factors.append("lower IV in calls")
-        else:
-            factors.append("lower IV in puts")
-            
-        if call_oi > put_oi * 1.2:
-            factors.append("higher OI in calls")
-        elif put_oi > call_oi * 1.2:
-            factors.append("higher OI in puts")
-            
-        if call_spread < put_spread * 0.8:
-            factors.append("tighter spreads in calls")
-        elif put_spread < call_spread * 0.8:
-            factors.append("tighter spreads in puts")
-            
-        if not factors:
-            return "Neutral - no clear advantage"
-            
-        return f"Consider {strike_data['moneyness']} {'call' if 'calls' in ' '.join(factors) else 'put'} " + \
-               f"due to {', '.join(factors)}"
 
     def plot_chain(self):
         """Visualize the option chain data"""
@@ -169,7 +191,7 @@ class OptionChainAnalyzer:
         plt.plot(self.option_chain['strikePrice'], self.option_chain['openInterest_put'], 
                 'r-', label='Put OI', alpha=0.7)
         plt.axvline(x=self.current_spot, color='b', linestyle='--', label='Current Spot')
-        plt.title('Open Interest by Strike Price')
+        plt.title(f'Open Interest by Strike Price (Expiry: {self.expiry_date})')
         plt.xlabel('Strike Price')
         plt.ylabel('Open Interest')
         plt.legend()
@@ -205,8 +227,8 @@ class OptionChainAnalyzer:
         plt.show()
 
     def run_analysis(self):
-        """Run complete analysis workflow"""
-        print(f"Fetching Nifty 50 option chain data for expiry {self.expiry_date}...")
+        """Main analysis workflow"""
+        self.get_user_input()
         raw_data = self.fetch_data()
         
         if raw_data is None:
@@ -219,63 +241,49 @@ class OptionChainAnalyzer:
             
         print("\n" + "="*50)
         print(f"Current Spot (Approx): {self.current_spot}")
+        print(f"Expiry Date: {self.expiry_date}")
         print(f"Total Strikes Available: {len(self.option_chain)}")
         print("="*50 + "\n")
         
-        # Display top options
-        for moneyness in ['ITM', 'OTM']:
-            for option_type in ['call', 'put']:
-                title = f"Top 5 {moneyness} {option_type.upper()} Options"
-                print("\n" + title)
-                print("-"*len(title))
-                
-                df = self.option_chain[self.option_chain['moneyness'] == moneyness]
-                sort_asc = (option_type == 'put') if moneyness == 'ITM' else (option_type == 'call')
-                cols = ['strikePrice', f'lastPrice_{option_type}', 
-                        f'openInterest_{option_type}', f'impliedVolatility_{option_type}']
-                
-                display(df.sort_values('strikePrice', ascending=sort_asc)
-                       .head(5)[cols].to_string(index=False))
+        # Show available strike prices
+        print("Available Strike Prices:")
+        print(self.option_chain['strikePrice'].unique())
         
-        # Plot the data
-        self.plot_chain()
-        
-        # Interactive strike analysis
+        # Get strike price from user
         while True:
-            print("\nOptions:")
-            print("1. Analyze specific strike")
-            print("2. Exit")
-            choice = input("Enter your choice: ")
-            
-            if choice == '1':
-                try:
-                    strike = float(input("Enter strike price to analyze: "))
-                    analysis = self.analyze_strike(strike)
+            try:
+                strike = float(input("\nEnter strike price to analyze: "))
+                analysis = self.analyze_strike(strike)
+                
+                if analysis:
+                    print("\nStrike Analysis Results:")
+                    print("-"*30)
+                    print(f"Strike Price: {analysis['strike']}")
+                    print(f"Moneyness: {self.option_chain[self.option_chain['strikePrice'] == strike]['moneyness'].values[0]}")
                     
-                    if analysis:
-                        print("\nStrike Analysis:")
-                        print(f"Strike: {analysis['strike']}")
-                        print("\nCall Option:")
-                        print(f"Last Price: {analysis['call']['lastPrice']}")
-                        print(f"Open Interest: {analysis['call']['openInterest']}")
-                        print(f"Implied Volatility: {analysis['call']['impliedVolatility']:.2f}%")
-                        print(f"Bid-Ask Spread: {analysis['call']['bidAskSpread']:.2f}")
-                        
-                        print("\nPut Option:")
-                        print(f"Last Price: {analysis['put']['lastPrice']}")
-                        print(f"Open Interest: {analysis['put']['openInterest']}")
-                        print(f"Implied Volatility: {analysis['put']['impliedVolatility']:.2f}%")
-                        print(f"Bid-Ask Spread: {analysis['put']['bidAskSpread']:.2f}")
-                        
-                        print("\nRecommendation:")
-                        print(analysis['recommendation'])
-                        
-                except ValueError:
-                    print("Please enter a valid strike price")
-            elif choice == '2':
-                break
-            else:
-                print("Invalid choice")
+                    print("\nCall Option:")
+                    print(f"Last Price: {analysis['call']['lastPrice']}")
+                    print(f"Open Interest: {analysis['call']['openInterest']}")
+                    print(f"Implied Volatility: {analysis['call']['impliedVolatility']:.2f}%")
+                    print(f"Bid-Ask Spread: {analysis['call']['bidAskSpread']:.2f}")
+                    
+                    print("\nPut Option:")
+                    print(f"Last Price: {analysis['put']['lastPrice']}")
+                    print(f"Open Interest: {analysis['put']['openInterest']}")
+                    print(f"Implied Volatility: {analysis['put']['impliedVolatility']:.2f}%")
+                    print(f"Bid-Ask Spread: {analysis['put']['bidAskSpread']:.2f}")
+                    
+                    print("\nRecommendation:")
+                    print(analysis['recommendation'])
+                    
+                    # Plot the data
+                    self.plot_chain()
+                    
+                    another = input("\nAnalyze another strike? (y/n): ").lower()
+                    if another != 'y':
+                        break
+            except ValueError:
+                print("Please enter a valid strike price number")
 
 if __name__ == "__main__":
     analyzer = OptionChainAnalyzer()
