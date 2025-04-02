@@ -10,7 +10,7 @@ import json
 
 # Configure page
 st.set_page_config(
-    page_title="Upstox Options Chain Dashboard",
+    page_title="PyStatIQ Options Chain Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -83,7 +83,7 @@ HEADERS = {
     "content-type": "application/json"
 }
 
-# Fetch data from Upstox API
+# Fetch data from API
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_options_data(asset_key="NSE_INDEX|Nifty 50", expiry="03-04-2025"):
     url = f"{BASE_URL}/strategy-chains?assetKey={asset_key}&strategyChainType=PC_CHAIN&expiry={expiry}"
