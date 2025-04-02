@@ -1,286 +1,589 @@
+import streamlit as st
 import requests
 import pandas as pd
-import matplotlib.pyplot as plt
-import json
+import numpy as np
+import plotly.express as px
 from datetime import datetime
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+import json
 
-class OptionChainAnalyzer:
-    def __init__(self):
-        self.option_chain = None
-        self.current_spot = None
-        self.expiry_date = "03-04-2025"
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+# Configure page
+st.set_page_config(
+    page_title="Upstox Options Chain Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
 
-    def fetch_data(self):
-        """Fetch option chain data from Upstox API"""
-        url = f"https://service.upstox.com/option-analytics-tool/open/v1/strategy-chains?assetKey=NSE_INDEX%7CNifty+50&strategyChainType=PC_CHAIN&expiry={self.expiry_date}"
+# Custom CSS
+st.markdown("""
+<style>
+    .main {
+        background-color: #f8f9fa;
+    }
+    .header {
+        color: #2c3e50;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+    .metric-card {
+        background-color: white;
+        border-radius: 10px;
+        padding: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        margin-bottom: 20px;
+    }
+    .stDataFrame {
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .positive {
+        color: #27ae60;
+    }
+    .negative {
+        color: #e74c3c;
+    }
+    .prediction-card {
+        background-color: #f1f8fe;
+        border-left: 5px solid #3498db;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+    .tabs {
+        margin-bottom: 20px;
+    }
+    .trade-recommendation {
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        background-color: #e8f5e9;
+        border-left: 5px solid #2e7d32;
+    }
+    .trade-recommendation.sell {
+        background-color: #ffebee;
+        border-left: 5px solid #c62828;
+    }
+    .strike-card {
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        background-color: #f5f5f5;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# API Configuration
+BASE_URL = "https://service.upstox.com/option-analytics-tool/open/v1"
+MARKET_DATA_URL = "https://service.upstox.com/market-data-api/v2/open/quote"
+HEADERS = {
+    "accept": "application/json",
+    "content-type": "application/json"
+}
+
+# Fetch data from Upstox API
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_options_data(asset_key="NSE_INDEX|Nifty 50", expiry="03-04-2025"):
+    url = f"{BASE_URL}/strategy-chains?assetKey={asset_key}&strategyChainType=PC_CHAIN&expiry={expiry}"
+    response = requests.get(url, headers=HEADERS)
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        st.error(f"Failed to fetch data: {response.status_code} - {response.text}")
+        return None
+
+# Fetch live Nifty price
+@st.cache_data(ttl=60)  # Cache for 1 minute
+def fetch_nifty_price():
+    url = f"{MARKET_DATA_URL}?i=NSE_INDEX|Nifty%2050"
+    response = requests.get(url, headers=HEADERS)
+    
+    if response.status_code == 200:
+        data = response.json()
+        return data['data']['lastPrice']
+    else:
+        st.error(f"Failed to fetch Nifty price: {response.status_code} - {response.text}")
+        return None
+
+# Process raw API data
+def process_options_data(raw_data, spot_price):
+    if not raw_data or 'data' not in raw_data:
+        return None
+    
+    strike_map = raw_data['data']['strategyChainData']['strikeMap']
+    processed_data = []
+    
+    for strike, data in strike_map.items():
+        call_data = data.get('callOptionData', {})
+        put_data = data.get('putOptionData', {})
         
-        print(f"\nFetching data for expiry {self.expiry_date}...")
+        # Market data
+        call_market = call_data.get('marketData', {})
+        put_market = put_data.get('marketData', {})
         
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            print(f"HTTP Status: {response.status_code}")
-            
-            if response.status_code != 200:
-                print(f"Error: Received status code {response.status_code}")
-                return None
-                
-            data = response.json()
-            
-            # Save raw data for debugging
-            with open('option_chain.json', 'w') as f:
-                json.dump(data, f, indent=2)
-            print("Raw data saved to 'option_chain.json'")
-            
-            return data
-            
-        except Exception as e:
-            print(f"Failed to fetch data: {str(e)}")
-            return None
-
-    def process_data(self, data):
-        """Process the API response into a structured DataFrame"""
-        if not data or 'data' not in data:
-            print("Invalid data format received")
-            return None, None
-            
-        try:
-            # Get ATM strike price
-            strikes = data['data']['strikePrices']
-            atm_strike = next((s['strikePrice'] for s in strikes if s.get('isAtm', False)), None)
-            
-            if not atm_strike:
-                print("Warning: Could not determine ATM strike, using first strike")
-                atm_strike = strikes[0]['strikePrice'] if strikes else None
-                if not atm_strike:
-                    print("Error: No strike prices found")
-                    return None, None
-
-            print(f"Current ATM strike: {atm_strike}")
-
-            # Process calls and puts
-            def process_options(options):
-                processed = []
-                for opt in options:
-                    try:
-                        processed.append({
-                            'strikePrice': float(opt['strikePrice']),
-                            'lastPrice': float(opt.get('lastPrice', 0)),
-                            'openInterest': float(opt.get('openInterest', 0)),
-                            'changeinOpenInterest': float(opt.get('changeinOpenInterest', 0)),
-                            'impliedVolatility': float(opt.get('impliedVolatility', 0)),
-                            'bidPrice': float(opt.get('bidPrice', 0)),
-                            'askPrice': float(opt.get('askPrice', 0)),
-                            'totalTradedVolume': float(opt.get('totalTradedVolume', 0))
-                        })
-                    except Exception as e:
-                        print(f"Skipping malformed option: {str(e)}")
-                        continue
-                return processed
-
-            calls = process_options(data['data']['callOptions'])
-            puts = process_options(data['data']['putOptions'])
-
-            # Create DataFrames
-            calls_df = pd.DataFrame(calls).add_suffix('_call')
-            puts_df = pd.DataFrame(puts).add_suffix('_put')
-            
-            # Merge DataFrames
-            option_chain = pd.merge(
-                calls_df.rename(columns={'strikePrice_call': 'strikePrice'}),
-                puts_df.rename(columns={'strikePrice_put': 'strikePrice'}),
-                on='strikePrice',
-                how='outer'
-            ).fillna(0)
-            
-            # Add moneyness
-            option_chain['moneyness'] = option_chain['strikePrice'].apply(
-                lambda x: 'ITM' if x < atm_strike else 'OTM' if x > atm_strike else 'ATM'
-            )
-
-            return option_chain, atm_strike
-            
-        except Exception as e:
-            print(f"Data processing failed: {str(e)}")
-            return None, None
-
-    def analyze_strike(self, strike):
-        """Analyze a specific strike price"""
-        if self.option_chain is None:
-            print("Option chain data not loaded")
-            return None
-            
-        try:
-            strike = float(strike)
-            strike_data = self.option_chain[self.option_chain['strikePrice'] == strike]
-            
-            if strike_data.empty:
-                print(f"Strike {strike} not found")
-                # Find nearest strike
-                nearest = self.option_chain.iloc[(self.option_chain['strikePrice']-strike).abs().argsort()[:1]]
-                print(f"Nearest available strike: {nearest['strikePrice'].values[0]}")
-                return None
-                
-            strike_data = strike_data.iloc[0]
-            
-            return {
-                'strike': strike,
-                'moneyness': strike_data['moneyness'],
-                'call': {
-                    'lastPrice': strike_data['lastPrice_call'],
-                    'openInterest': strike_data['openInterest_call'],
-                    'impliedVolatility': strike_data['impliedVolatility_call'],
-                    'bidAskSpread': strike_data['askPrice_call'] - strike_data['bidPrice_call']
-                },
-                'put': {
-                    'lastPrice': strike_data['lastPrice_put'],
-                    'openInterest': strike_data['openInterest_put'],
-                    'impliedVolatility': strike_data['impliedVolatility_put'],
-                    'bidAskSpread': strike_data['askPrice_put'] - strike_data['bidPrice_put']
-                }
-            }
-            
-        except Exception as e:
-            print(f"Strike analysis failed: {str(e)}")
-            return None
-
-    def generate_recommendation(self, analysis):
-        """Generate trading recommendation"""
-        if not analysis:
-            return "No recommendation - invalid analysis data"
-            
-        call_score = put_score = 0
-        factors = []
+        # Analytics data
+        call_analytics = call_data.get('analytics', {})
+        put_analytics = put_data.get('analytics', {})
         
-        # IV comparison (lower is better)
-        if analysis['call']['impliedVolatility'] < analysis['put']['impliedVolatility']:
-            call_score += 1
-            factors.append("Lower call IV")
-        else:
-            put_score += 1
-            factors.append("Lower put IV")
+        strike_float = float(strike)
+        
+        processed_data.append({
+            'strike': strike_float,
+            'pcr': data.get('pcr', 0),
             
-        # OI comparison (higher is better)
-        if analysis['call']['openInterest'] > analysis['put']['openInterest']:
-            call_score += 1
-            factors.append("Higher call OI")
-        else:
-            put_score += 1
-            factors.append("Higher put OI")
+            # Moneyness
+            'call_moneyness': 'ITM' if strike_float < spot_price else ('ATM' if strike_float == spot_price else 'OTM'),
+            'put_moneyness': 'ITM' if strike_float > spot_price else ('ATM' if strike_float == spot_price else 'OTM'),
             
-        # Spread comparison (tighter is better)
-        if analysis['call']['bidAskSpread'] < analysis['put']['bidAskSpread']:
-            call_score += 1
-            factors.append("Tighter call spread")
-        else:
-            put_score += 1
-            factors.append("Tighter put spread")
+            # Call data
+            'call_ltp': call_market.get('ltp', 0),
+            'call_bid': call_market.get('bidPrice', 0),
+            'call_ask': call_market.get('askPrice', 0),
+            'call_volume': call_market.get('volume', 0),
+            'call_oi': call_market.get('oi', 0),
+            'call_prev_oi': call_market.get('prevOi', 0),
+            'call_oi_change': call_market.get('oi', 0) - call_market.get('prevOi', 0),
+            'call_iv': call_analytics.get('iv', 0),
+            'call_delta': call_analytics.get('delta', 0),
+            'call_gamma': call_analytics.get('gamma', 0),
+            'call_theta': call_analytics.get('theta', 0),
+            'call_vega': call_analytics.get('vega', 0),
             
-        if call_score > put_score:
-            return f"BUY CALL (Score {call_score}-{put_score})\nReasons: {', '.join(factors)}"
-        elif put_score > call_score:
-            return f"BUY PUT (Score {put_score}-{call_score})\nReasons: {', '.join(factors)}"
-        else:
-            return f"NEUTRAL (Score {call_score}-{put_score})\nReasons: {', '.join(factors)}"
+            # Put data
+            'put_ltp': put_market.get('ltp', 0),
+            'put_bid': put_market.get('bidPrice', 0),
+            'put_ask': put_market.get('askPrice', 0),
+            'put_volume': put_market.get('volume', 0),
+            'put_oi': put_market.get('oi', 0),
+            'put_prev_oi': put_market.get('prevOi', 0),
+            'put_oi_change': put_market.get('oi', 0) - put_market.get('prevOi', 0),
+            'put_iv': put_analytics.get('iv', 0),
+            'put_delta': put_analytics.get('delta', 0),
+            'put_gamma': put_analytics.get('gamma', 0),
+            'put_theta': put_analytics.get('theta', 0),
+            'put_vega': put_analytics.get('vega', 0),
+        })
+    
+    return pd.DataFrame(processed_data)
 
-    def plot_chain(self):
-        """Plot option chain data"""
-        if self.option_chain is None:
-            print("No data to plot")
-            return
-            
-        plt.figure(figsize=(15, 10))
-        
-        # Price Plot
-        plt.subplot(2, 1, 1)
-        plt.plot(self.option_chain['strikePrice'], self.option_chain['lastPrice_call'], 'g-', label='Call Price')
-        plt.plot(self.option_chain['strikePrice'], self.option_chain['lastPrice_put'], 'r-', label='Put Price')
-        plt.axvline(x=self.current_spot, color='b', linestyle='--', label='ATM Strike')
-        plt.title(f'Nifty 50 Option Prices (Expiry: {self.expiry_date})')
-        plt.xlabel('Strike Price')
-        plt.ylabel('Option Price')
-        plt.legend()
-        plt.grid(True)
-        
-        # Open Interest Plot
-        plt.subplot(2, 1, 2)
-        plt.plot(self.option_chain['strikePrice'], self.option_chain['openInterest_call'], 'g-', label='Call OI')
-        plt.plot(self.option_chain['strikePrice'], self.option_chain['openInterest_put'], 'r-', label='Put OI')
-        plt.axvline(x=self.current_spot, color='b', linestyle='--', label='ATM Strike')
-        plt.title('Open Interest')
-        plt.xlabel('Strike Price')
-        plt.ylabel('Open Interest')
-        plt.legend()
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.show()
+# Get top ITM/OTM strikes
+def get_top_strikes(df, spot_price, n=5):
+    # For calls: ITM = strike < spot, OTM = strike > spot
+    call_itm = df[df['strike'] < spot_price].sort_values('strike', ascending=False).head(n)
+    call_otm = df[df['strike'] > spot_price].sort_values('strike', ascending=True).head(n)
+    
+    # For puts: ITM = strike > spot, OTM = strike < spot
+    put_itm = df[df['strike'] > spot_price].sort_values('strike', ascending=True).head(n)
+    put_otm = df[df['strike'] < spot_price].sort_values('strike', ascending=False).head(n)
+    
+    return {
+        'call_itm': call_itm,
+        'call_otm': call_otm,
+        'put_itm': put_itm,
+        'put_otm': put_otm
+    }
 
-    def run(self):
-        """Main execution"""
-        print(f"\nNifty 50 Option Chain Analyzer")
-        print(f"Expiry Date: {self.expiry_date}")
-        print("="*50)
+# Generate trade recommendations
+def generate_trade_recommendations(df, spot_price):
+    recommendations = []
+    
+    # Calculate metrics for all strikes
+    df['call_premium_ratio'] = (df['call_ask'] - df['call_bid']) / df['call_ltp']
+    df['put_premium_ratio'] = (df['put_ask'] - df['put_bid']) / df['put_ltp']
+    df['call_risk_reward'] = (spot_price - df['strike'] + df['call_ltp']) / df['call_ltp']
+    df['put_risk_reward'] = (df['strike'] - spot_price + df['put_ltp']) / df['put_ltp']
+    
+    # Find best calls to buy (low premium ratio, high OI change, good risk/reward)
+    best_calls = df[(df['call_moneyness'] == 'OTM') & 
+                   (df['call_premium_ratio'] < 0.1) &
+                   (df['call_oi_change'] > 0)].sort_values(
+        by=['call_premium_ratio', 'call_oi_change'], 
+        ascending=[True, False]
+    ).head(3)
+    
+    for _, row in best_calls.iterrows():
+        recommendations.append({
+            'type': 'BUY CALL',
+            'strike': row['strike'],
+            'premium': row['call_ltp'],
+            'iv': row['call_iv'],
+            'oi_change': row['call_oi_change'],
+            'risk_reward': f"{row['call_risk_reward']:.1f}:1",
+            'reason': "Low spread, OI buildup, good risk/reward"
+        })
+    
+    # Find best puts to buy (low premium ratio, high OI change, good risk/reward)
+    best_puts = df[(df['put_moneyness'] == 'OTM') & 
+                  (df['put_premium_ratio'] < 0.1) &
+                  (df['put_oi_change'] > 0)].sort_values(
+        by=['put_premium_ratio', 'put_oi_change'], 
+        ascending=[True, False]
+    ).head(3)
+    
+    for _, row in best_puts.iterrows():
+        recommendations.append({
+            'type': 'BUY PUT',
+            'strike': row['strike'],
+            'premium': row['put_ltp'],
+            'iv': row['put_iv'],
+            'oi_change': row['put_oi_change'],
+            'risk_reward': f"{row['put_risk_reward']:.1f}:1",
+            'reason': "Low spread, OI buildup, good risk/reward"
+        })
+    
+    # Find best calls to sell (high premium ratio, decreasing OI)
+    best_sell_calls = df[(df['call_moneyness'] == 'ITM') & 
+                        (df['call_premium_ratio'] > 0.15) &
+                        (df['call_oi_change'] < 0)].sort_values(
+        by=['call_premium_ratio', 'call_oi_change'], 
+        ascending=[False, True]
+    ).head(2)
+    
+    for _, row in best_sell_calls.iterrows():
+        recommendations.append({
+            'type': 'SELL CALL',
+            'strike': row['strike'],
+            'premium': row['call_ltp'],
+            'iv': row['call_iv'],
+            'oi_change': row['call_oi_change'],
+            'risk_reward': f"{1/row['call_risk_reward']:.1f}:1",
+            'reason': "High spread, OI unwinding, favorable risk"
+        })
+    
+    # Find best puts to sell (high premium ratio, decreasing OI)
+    best_sell_puts = df[(df['put_moneyness'] == 'ITM') & 
+                       (df['put_premium_ratio'] > 0.15) &
+                       (df['put_oi_change'] < 0)].sort_values(
+        by=['put_premium_ratio', 'put_oi_change'], 
+        ascending=[False, True]
+    ).head(2)
+    
+    for _, row in best_sell_puts.iterrows():
+        recommendations.append({
+            'type': 'SELL PUT',
+            'strike': row['strike'],
+            'premium': row['put_ltp'],
+            'iv': row['put_iv'],
+            'oi_change': row['put_oi_change'],
+            'risk_reward': f"{1/row['put_risk_reward']:.1f}:1",
+            'reason': "High spread, OI unwinding, favorable risk"
+        })
+    
+    return recommendations
+
+# Main App
+def main():
+    st.markdown("<div class='header'><h1>📊 Upstox Options Chain Dashboard</h1></div>", unsafe_allow_html=True)
+    
+    # Fetch spot price
+    spot_price = fetch_nifty_price()
+    if spot_price is None:
+        st.error("Failed to fetch Nifty spot price. Using default value.")
+        spot_price = 22000  # Default fallback
+    
+    # Sidebar controls
+    with st.sidebar:
+        st.header("Filters")
+        asset_key = st.selectbox(
+            "Underlying Asset",
+            ["NSE_INDEX|Nifty 50", "NSE_INDEX|Bank Nifty"],
+            index=0
+        )
         
-        # Fetch and process data
-        raw_data = self.fetch_data()
-        if not raw_data:
-            print("\nFailed to fetch data. Possible reasons:")
-            print("- API requires authentication")
-            print("- Network issues")
-            print("- Invalid response format")
-            print("\nCheck 'option_chain.json' for raw response")
-            return
-            
-        self.option_chain, self.current_spot = self.process_data(raw_data)
-        if self.option_chain is None:
-            print("\nFailed to process data")
-            return
-            
-        print(f"\nData loaded successfully. Current ATM: {self.current_spot}")
-        print(f"Available strikes: {self.option_chain['strikePrice'].min()} to {self.option_chain['strikePrice'].max()}")
+        expiry_date = st.date_input(
+            "Expiry Date",
+            datetime.strptime("03-04-2025", "%d-%m-%Y")
+        ).strftime("%d-%m-%Y")
         
-        # Interactive analysis
-        while True:
-            strike = input("\nEnter strike price to analyze (or 'q' to quit): ").strip()
-            if strike.lower() == 'q':
-                break
-                
-            try:
-                strike = float(strike)
-                analysis = self.analyze_strike(strike)
-                
-                if not analysis:
-                    continue
-                    
-                print("\n" + "="*50)
-                print(f"Analysis for Strike: {analysis['strike']} ({analysis['moneyness']})")
-                print("-"*50)
-                
-                print("\nCALL OPTION:")
-                print(f"Last Price: {analysis['call']['lastPrice']:.2f}")
-                print(f"Open Interest: {analysis['call']['openInterest']:,.0f}")
-                print(f"Implied Volatility: {analysis['call']['impliedVolatility']:.2f}%")
-                print(f"Bid-Ask Spread: {analysis['call']['bidAskSpread']:.2f}")
-                
-                print("\nPUT OPTION:")
-                print(f"Last Price: {analysis['put']['lastPrice']:.2f}")
-                print(f"Open Interest: {analysis['put']['openInterest']:,.0f}")
-                print(f"Implied Volatility: {analysis['put']['impliedVolatility']:.2f}%")
-                print(f"Bid-Ask Spread: {analysis['put']['bidAskSpread']:.2f}")
-                
-                print("\nRECOMMENDATION:")
-                print(self.generate_recommendation(analysis))
-                print("="*50)
-                
-                # Show plots
-                self.plot_chain()
-                
-            except ValueError:
-                print("Please enter a valid number or 'q' to quit")
+        st.markdown("---")
+        st.markdown(f"**Current Nifty Spot Price: {spot_price:,.2f}**")
+        
+        st.markdown("---")
+        st.markdown("**Analysis Settings**")
+        volume_threshold = st.number_input("High Volume Threshold", value=5000000)
+        oi_change_threshold = st.number_input("Significant OI Change", value=1000000)
+        
+        st.markdown("---")
+        st.markdown("**About**")
+        st.markdown("This dashboard provides real-time options chain analysis using Upstox API data.")
+    
+    # Fetch and process data
+    with st.spinner("Fetching live options data..."):
+        raw_data = fetch_options_data(asset_key, expiry_date)
+    
+    if raw_data is None:
+        st.error("Failed to load data. Please try again later.")
+        return
+    
+    df = process_options_data(raw_data, spot_price)
+    if df is None or df.empty:
+        st.error("No data available for the selected parameters.")
+        return
+    
+    # Get top strikes
+    top_strikes = get_top_strikes(df, spot_price)
+    
+    # Default strike selection (ATM)
+    atm_strike = df.iloc[(df['strike'] - spot_price).abs().argsort()[:1]]['strike'].values[0]
+    
+    # Main columns
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col1:
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("**Total Call OI**")
+        total_call_oi = df['call_oi'].sum()
+        st.markdown(f"<h2>{total_call_oi:,}</h2>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("**Total Put OI**")
+        total_put_oi = df['put_oi'].sum()
+        st.markdown(f"<h2>{total_put_oi:,}</h2>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with col2:
+        # Strike price selector
+        selected_strike = st.selectbox(
+            "Select Strike Price",
+            df['strike'].unique(),
+            index=int(np.where(df['strike'].unique() == atm_strike)[0][0])
+        )
+        
+        # PCR gauge
+        pcr = df[df['strike'] == selected_strike]['pcr'].values[0]
+        fig = px.bar(x=[pcr], range_x=[0, 2], title=f"Put-Call Ratio: {pcr:.2f}")
+        fig.update_layout(
+            xaxis_title="PCR",
+            yaxis_visible=False,
+            height=150,
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
+        fig.add_vline(x=0.7, line_dash="dot", line_color="green")
+        fig.add_vline(x=1.3, line_dash="dot", line_color="red")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col3:
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("**Call OI Change**")
+        call_oi_change = df[df['strike'] == selected_strike]['call_oi_change'].values[0]
+        change_color = "positive" if call_oi_change > 0 else "negative"
+        st.markdown(f"<h2 class='{change_color}'>{call_oi_change:,}</h2>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+        st.markdown("**Put OI Change**")
+        put_oi_change = df[df['strike'] == selected_strike]['put_oi_change'].values[0]
+        change_color = "positive" if put_oi_change > 0 else "negative"
+        st.markdown(f"<h2 class='{change_color}'>{put_oi_change:,}</h2>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Top Strikes Section
+    st.markdown("### Top ITM/OTM Strike Prices")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown("**Top ITM Call Strikes**")
+        for _, row in top_strikes['call_itm'].iterrows():
+            st.markdown(f"""
+                <div class='strike-card'>
+                    <b>{row['strike']:.0f}</b> (LTP: {row['call_ltp']:.2f})<br>
+                    OI: {row['call_oi']:,} (Δ: {row['call_oi_change']:,})<br>
+                    IV: {row['call_iv']:.1f}%
+                </div>
+            """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("**Top OTM Call Strikes**")
+        for _, row in top_strikes['call_otm'].iterrows():
+            st.markdown(f"""
+                <div class='strike-card'>
+                    <b>{row['strike']:.0f}</b> (LTP: {row['call_ltp']:.2f})<br>
+                    OI: {row['call_oi']:,} (Δ: {row['call_oi_change']:,})<br>
+                    IV: {row['call_iv']:.1f}%
+                </div>
+            """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("**Top ITM Put Strikes**")
+        for _, row in top_strikes['put_itm'].iterrows():
+            st.markdown(f"""
+                <div class='strike-card'>
+                    <b>{row['strike']:.0f}</b> (LTP: {row['put_ltp']:.2f})<br>
+                    OI: {row['put_oi']:,} (Δ: {row['put_oi_change']:,})<br>
+                    IV: {row['put_iv']:.1f}%
+                </div>
+            """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown("**Top OTM Put Strikes**")
+        for _, row in top_strikes['put_otm'].iterrows():
+            st.markdown(f"""
+                <div class='strike-card'>
+                    <b>{row['strike']:.0f}</b> (LTP: {row['put_ltp']:.2f})<br>
+                    OI: {row['put_oi']:,} (Δ: {row['put_oi_change']:,})<br>
+                    IV: {row['put_iv']:.1f}%
+                </div>
+            """, unsafe_allow_html=True)
+    
+    # Trade Recommendations
+    st.markdown("### Trade Recommendations")
+    recommendations = generate_trade_recommendations(df, spot_price)
+    
+    if recommendations:
+        for rec in recommendations:
+            is_sell = 'SELL' in rec['type']
+            st.markdown(f"""
+                <div class='trade-recommendation{' sell' if is_sell else ''}'>
+                    <h4>{rec['type']} @ {rec['strike']:.0f}</h4>
+                    <p>
+                        Premium: {rec['premium']:.2f} | IV: {rec['iv']:.1f}%<br>
+                        OI Change: {rec['oi_change']:,} | Risk/Reward: {rec['risk_reward']}<br>
+                        <b>Reason:</b> {rec['reason']}
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No strong trade recommendations based on current market conditions")
+    
+    # Tab layout
+    tab1, tab2, tab3 = st.tabs(["Strike Analysis", "OI/Volume Trends", "Advanced Analytics"])
+    
+    with tab1:
+        st.markdown(f"### Detailed Analysis for Strike: {selected_strike}")
+        
+        # Get selected strike data
+        strike_data = df[df['strike'] == selected_strike].iloc[0]
+        
+        # Create comparison table
+        comparison_df = pd.DataFrame({
+            'Metric': ['LTP', 'Bid', 'Ask', 'Volume', 'OI', 'OI Change', 'IV', 'Delta', 'Gamma', 'Theta', 'Vega'],
+            'Call': [
+                strike_data['call_ltp'],
+                strike_data['call_bid'],
+                strike_data['call_ask'],
+                strike_data['call_volume'],
+                strike_data['call_oi'],
+                strike_data['call_oi_change'],
+                strike_data['call_iv'],
+                strike_data['call_delta'],
+                strike_data['call_gamma'],
+                strike_data['call_theta'],
+                strike_data['call_vega']
+            ],
+            'Put': [
+                strike_data['put_ltp'],
+                strike_data['put_bid'],
+                strike_data['put_ask'],
+                strike_data['put_volume'],
+                strike_data['put_oi'],
+                strike_data['put_oi_change'],
+                strike_data['put_iv'],
+                strike_data['put_delta'],
+                strike_data['put_gamma'],
+                strike_data['put_theta'],
+                strike_data['put_vega']
+            ]
+        })
+        
+        st.dataframe(
+            comparison_df.style.format({
+                'Call': '{:,.2f}',
+                'Put': '{:,.2f}'
+            }),
+            use_container_width=True,
+            height=400
+        )
+    
+    with tab2:
+        st.markdown("### Open Interest & Volume Trends")
+        
+        # Nearby strikes
+        all_strikes = sorted(df['strike'].unique())
+        current_idx = all_strikes.index(selected_strike)
+        nearby_strikes = all_strikes[max(0, current_idx-5):min(len(all_strikes), current_idx+6)]
+        nearby_df = df[df['strike'].isin(nearby_strikes)]
+        
+        # OI Change plot
+        fig = px.bar(
+            nearby_df,
+            x='strike',
+            y=['call_oi_change', 'put_oi_change'],
+            barmode='group',
+            title=f'OI Changes Around {selected_strike}',
+            labels={'value': 'OI Change', 'strike': 'Strike Price'},
+            color_discrete_map={'call_oi_change': '#3498db', 'put_oi_change': '#e74c3c'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Volume plot
+        fig = px.bar(
+            nearby_df,
+            x='strike',
+            y=['call_volume', 'put_volume'],
+            barmode='group',
+            title=f'Volume Around {selected_strike}',
+            labels={'value': 'Volume', 'strike': 'Strike Price'},
+            color_discrete_map={'call_volume': '#3498db', 'put_volume': '#e74c3c'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        st.markdown("### Advanced Analytics")
+        
+        # IV Skew Analysis
+        st.markdown("#### IV Skew Analysis")
+        fig = px.line(
+            df,
+            x='strike',
+            y=['call_iv', 'put_iv'],
+            title='Implied Volatility Skew',
+            labels={'value': 'IV (%)', 'strike': 'Strike Price'},
+            color_discrete_map={'call_iv': '#3498db', 'put_iv': '#e74c3c'}
+        )
+        fig.add_vline(x=spot_price, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Risk Analysis
+        st.markdown("#### Risk Analysis")
+        
+        # Max pain calculation
+        pain_points = []
+        for strike in df['strike'].unique():
+            strike_row = df[df['strike'] == strike].iloc[0]
+            pain_points.append((strike, strike_row['call_oi'] + strike_row['put_oi']))
+        
+        max_pain_strike = min(pain_points, key=lambda x: x[1])[0] if pain_points else selected_strike
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("**Maximum Pain**")
+            st.markdown(f"Current Strike: {selected_strike}")
+            st.markdown(f"Max Pain Strike: {max_pain_strike}")
+            
+            if abs(max_pain_strike - selected_strike) <= (all_strikes[1] - all_strikes[0]) * 2:
+                st.warning("Close to max pain - increased pin risk")
+            else:
+                st.success("Not near max pain level")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+            st.markdown("**Gamma Exposure**")
+            
+            net_gamma = strike_data['call_gamma'] - strike_data['put_gamma']
+            if net_gamma > 0:
+                st.info("Positive Gamma: Market makers likely to buy on dips, sell on rallies")
+            else:
+                st.warning("Negative Gamma: Market makers likely to sell on dips, buy on rallies")
+            
+            st.markdown(f"Net Gamma: {net_gamma:.4f}")
+            st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    analyzer = OptionChainAnalyzer()
-    analyzer.run()
+    main()
