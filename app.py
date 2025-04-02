@@ -308,7 +308,7 @@ def main():
         
         st.markdown("---")
         st.markdown("**About**")
-        st.markdown("This dashboard provides real-time options chain analysis using Upstox API data.")
+        st.markdown("This dashboard provides real-time options chain analysis using data.")
     
     # Fetch and process data
     with st.spinner("Fetching live options data..."):
