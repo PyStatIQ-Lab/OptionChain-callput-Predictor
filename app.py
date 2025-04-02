@@ -130,5 +130,3 @@ if __name__ == "__main__":
         plt.show()
     else:
         print("Failed to analyze option chain data")
-        print(response.status_code)
-print(response.text)  # To see the raw response
