@@ -50,7 +50,6 @@ st.markdown("""
         padding: 15px;
         border-radius: 5px;
         margin-bottom: 20px;
-        color: #000;
     }
     .tabs {
         margin-bottom: 20px;
@@ -61,6 +60,7 @@ st.markdown("""
         margin-bottom: 10px;
         background-color: #e8f5e9;
         border-left: 5px solid #2e7d32;
+        color: #000;
     }
     .trade-recommendation.sell {
         background-color: #ffebee;
