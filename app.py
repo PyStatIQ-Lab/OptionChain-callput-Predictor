@@ -50,7 +50,7 @@ st.markdown("""
         padding: 15px;
         border-radius: 5px;
         margin-bottom: 20px;
-        color: #fff;
+        color: #000;
     }
     .tabs {
         margin-bottom: 20px;
