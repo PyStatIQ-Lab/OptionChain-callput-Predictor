@@ -276,7 +276,7 @@ def generate_trade_recommendations(df, spot_price):
 
 # Main App
 def main():
-    st.markdown("<div class='header'><h1>📊 Upstox Options Chain Dashboard</h1></div>", unsafe_allow_html=True)
+    st.markdown("<div class='header'><h1>📊 PyStatIQ Options Chain Dashboard</h1></div>", unsafe_allow_html=True)
     
     # Fetch spot price
     spot_price = fetch_nifty_price()
